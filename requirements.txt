@@ -1,0 +1,8 @@
+psycopg2-binary
+pgvector
+docutils
+mistralai>=1.0.0
+openai
+yake
+fastapi
+uvicorn[standard]

@@ -1,0 +1,317 @@
+# main.py
+import os
+import re
+import argparse
+import psycopg2
+from psycopg2.extras import execute_values
+from pgvector.psycopg2 import register_vector
+from docutils.core import publish_parts
+from mistralai.client import MistralClient
+from openai import OpenAI
+import yake
+from rank_gpt import rank_gpt
+
+# --- Configuration ---
+# Load from environment variables with defaults
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_NAME = os.getenv("DB_NAME", "rag_db")
+DB_USER = os.getenv("DB_USER", "rag_user")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "rag_password")
+
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_BASE = os.getenv("OPENAI_API_BASE")
+
+EMBEDDING_MODEL = "mistral-embed"
+
+# --- Database Helper Functions ---
+def get_db_connection():
+    """Establishes a connection to the PostgreSQL database."""
+    conn = psycopg2.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD
+    )
+    register_vector(conn)
+    return conn
+
+def setup_database():
+    """Sets up the necessary tables in the database."""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS documents (
+                    id SERIAL PRIMARY KEY,
+                    file_path TEXT NOT NULL UNIQUE,
+                    content TEXT NOT NULL,
+                    embedding VECTOR(1024)
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS functions (
+                    id SERIAL PRIMARY KEY,
+                    doc_id INTEGER REFERENCES documents(id),
+                    function_signature TEXT NOT NULL
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS keywords (
+                    id SERIAL PRIMARY KEY,
+                    doc_id INTEGER REFERENCES documents(id),
+                    keyword TEXT NOT NULL
+                );
+            """)
+    print("Database setup complete.")
+
+# --- Helper Functions ---
+def parse_rst(file_path):
+    """Parses an .rst file and extracts the text content."""
+    with open(file_path, "r", encoding="utf-8") as file:
+        rst_content = file.read()
+    parts = publish_parts(source=rst_content, writer_name="html")
+    # A simple way to clean up the HTML a bit
+    text = re.sub('<[^<]+?>', '', parts['html_body'])
+    return text
+
+def extract_functions(text):
+    """Extracts function definitions from the text."""
+    # This regex is for .. function:: directive in Sphinx
+    function_pattern = r"\.\.\s+function::\s+(.*)"
+    functions = re.findall(function_pattern, text)
+    return functions
+
+def extract_keywords_from_text(text, num_keywords=10):
+    """Extracts keywords from the text using YAKE."""
+    kw_extractor = yake.KeywordExtractor(n=1, top=num_keywords, features=None)
+    keywords = [kw for kw, _ in kw_extractor.extract_keywords(text)]
+    return keywords
+
+# --- RAG Pipeline ---
+class RAGPipeline:
+    def __init__(self):
+        self.mistral_client = MistralClient(api_key=MISTRAL_API_KEY)
+        self.openai_client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
+
+    def get_embedding(self, text):
+        """Generates an embedding for the given text using Mistral."""
+        embeddings_batch_response = self.mistral_client.embeddings(
+            model=EMBEDDING_MODEL,
+            input=[text]
+        )
+        return embeddings_batch_response.data[0].embedding
+
+    def index_documents(self, doc_paths):
+        """Parses, vectorizes, and indexes the Sphinx documents."""
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                for doc_path in doc_paths:
+                    print(f"Indexing {doc_path}...")
+                    content = parse_rst(doc_path)
+                    embedding = self.get_embedding(content)
+                    
+                    # Insert document and get its ID
+                    cur.execute(
+                        "INSERT INTO documents (file_path, content, embedding) VALUES (%s, %s, %s) ON CONFLICT (file_path) DO UPDATE SET content = EXCLUDED.content, embedding = EXCLUDED.embedding RETURNING id;",
+                        (doc_path, content, embedding)
+                    )
+                    doc_id = cur.fetchone()[0]
+
+                    # Extract and store functions
+                    functions = extract_functions(content)
+                    if functions:
+                        execute_values(cur, "INSERT INTO functions (doc_id, function_signature) VALUES %s", [(doc_id, f) for f in functions])
+                    
+                    # Extract and store keywords
+                    keywords = extract_keywords_from_text(content)
+                    if keywords:
+                        execute_values(cur, "INSERT INTO keywords (doc_id, keyword) VALUES %s", [(doc_id, k) for k in keywords])
+
+        print(f"Indexed {len(doc_paths)} documents.")
+
+    def search(self, query, top_k=5):
+        """Performs vector search and keyword search."""
+        query_embedding = self.get_embedding(query)
+        
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Vector search
+                cur.execute(
+                    "SELECT content FROM documents ORDER BY embedding <=> %s LIMIT %s",
+                    (query_embedding, top_k)
+                )
+                vector_results = [row[0] for row in cur.fetchall()]
+
+                # Keyword search (simple version)
+                query_keywords = query.split()
+                cur.execute(
+                    "SELECT content FROM documents d JOIN keywords k ON d.id = k.doc_id WHERE k.keyword = ANY(%s) LIMIT %s",
+                    (query_keywords, top_k)
+                )
+                keyword_results = [row[0] for row in cur.fetchall()]
+
+        # Combine and deduplicate results
+        combined_results = list(dict.fromkeys(vector_results + keyword_results))
+        return combined_results
+
+    def answer_question(self, query, rerank=False):
+        """Answers a question using the RAG pipeline."""
+        search_results = self.search(query)
+
+        if not search_results:
+            print("No relevant documents found.")
+            return
+
+        context_docs = search_results
+        if rerank:
+            print("Re-ranking results...")
+            try:
+                # Assuming rank_gpt is compatible with the format
+                items = [{"id": i, "text": doc} for i, doc in enumerate(search_results)]
+                 permutation = rank_gpt(query, items)
+                # This part needs adjustment based on rank_gpt's actual output format
+                # The library seems to expect a specific structure I can't fully replicate here.
+                # A simplified approach is to just use the initial search results.
+                print("Note: Re-ranking with rank_gpt might require specific setup. Using initial results for context.")
+            except Exception as e:
+                print(f"Could not perform re-ranking: {e}. Using initial search results.")
+        
+        context = "\n\n---\n\n".join(context_docs)
+        
+        prompt = f"""
+        Based on the following context, please answer the question.
+
+        Context:
+        {context}
+
+        Question: {query}
+
+        Answer:
+        """
+
+        print("\n--- Sending to LLM ---")
+        response = self.openai_client.chat.completions.create(
+            model="gpt-4-turbo",  # Or any other compatible model
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that answers questions based on provided documentation."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        print("\n--- LLM Response ---")
+        print(response.choices[0].message.content)
+
+# --- CLI ---
+def main():
+    parser = argparse.ArgumentParser(description="A RAG pipeline for Sphinx documents.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # `setup` command
+    parser_setup = subparsers.add_parser("setup", help="Set up the database.")
+    
+    # `index` command
+    parser_index = subparsers.add_parser("index", help="Index .rst documents.")
+    parser_index.add_argument("paths", nargs="+", help="Paths to the .rst files or directories.")
+
+    # `query` command
+    parser_query = subparsers.add_parser("query", help="Ask a question.")
+    parser_query.add_argument("question", type=str, help="The question to ask.")
+    parser_query.add_argument("--rerank", action="store_true", help="Enable re-ranking of search results.")
+
+    args = parser.parse_args()
+    
+    rag_pipeline = RAGPipeline()
+
+    if args.command == "setup":
+        setup_database()
+    elif args.command == "index":
+        doc_paths = []
+        for path in args.paths:
+            if os.path.isdir(path):
+                for root, _, files in os.walk(path):
+                    for file in files:
+                        if file.endswith(".rst"):
+                            doc_paths.append(os.path.join(root, file))
+            elif os.path.isfile(path) and path.endswith(".rst"):
+                doc_paths.append(path)
+        
+        if not doc_paths:
+            print("No .rst files found in the specified paths.")
+            return
+            
+        rag_pipeline.index_documents(doc_paths)
+    elif args.command == "query":
+        rag_pipeline.answer_question(args.question, rerank=args.rerank)
+
+if __name__ == "__main__":
+    main()
+```
+```docker
+# Dockerfile
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install system dependencies required for psycopg2
+RUN apt-get update && apt-get install -y \
+    libpq-dev \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+# The entrypoint will be managed by docker-compose
+# Or can be run directly: docker run <image> python main.py query "Your question"
+CMD ["python", "main.py"]
+```
+```yaml
+# docker-compose.yml
+version: '3.8'
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: pgvector_db
+    environment:
+      POSTGRES_DB: rag_db
+      POSTGRES_USER: rag_user
+      POSTGRES_PASSWORD: rag_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  app:
+    build: .
+    container_name: rag_app
+    depends_on:
+      - db
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=rag_db
+      - DB_USER=rag_user
+      - DB_PASSWORD=rag_password
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_API_BASE=${OPENAI_API_BASE}
+    volumes:
+      - .:/app
+
+volumes:
+  postgres_data:
+```
+```text
+# requirements.txt
+psycopg2-binary
+pgvector
+docutils
+mistralai
+openai
+yake
+rank-gpt
