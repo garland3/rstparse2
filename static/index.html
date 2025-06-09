@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG Chat Interface</title>
+    <script src="/static/js/marked.min.js"></script>
+    <script src="/static/js/prism-core.min.js"></script>
+    <script src="/static/js/prism-autoloader.min.js"></script>
+    <link href="/static/css/prism.css" rel="stylesheet">
+    <link href="/static/css/chat.css" rel="stylesheet">
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <h1>RAG Chat Interface</h1>
+            <p>Ask questions about your indexed Sphinx documentation</p>
+        </div>
+        
+        <div class="chat-messages" id="chatMessages">
+            <div class="message bot">
+                <div class="message-content">
+                    Hello! I'm here to help you find information from your indexed documentation. Ask me anything!
+                </div>
+            </div>
+        </div>
+        
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            Processing your question...
+        </div>
+        
+        <div class="chat-input-container">
+            <form class="chat-input-form" id="chatForm">
+                <input 
+                    type="text" 
+                    class="chat-input" 
+                    id="messageInput" 
+                    placeholder="Type your question here..." 
+                    required
+                >
+                <button type="submit" class="send-button" id="sendButton">Send</button>
+            </form>
+            <div class="options">
+                <div class="checkbox-container">
+                    <input type="checkbox" id="rerankCheckbox">
+                    <label for="rerankCheckbox">Enable re-ranking</label>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/chat.js"></script>
+</body>
+</html>
