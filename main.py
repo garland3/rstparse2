@@ -471,6 +471,53 @@ class RAGPipeline:
         print("\n--- LLM Response ---")
         print(response.choices[0].message.content)
     
+    def get_answer_with_sources(self, query, rerank=False):
+        """Answers a question using the RAG pipeline and returns both response and sources."""
+        search_results = self.search(query)
+
+        if not search_results:
+            return "No relevant documents found.", []
+
+        context_docs = search_results
+        if rerank:
+            # Simple re-ranking based on query keyword overlap
+            try:
+                query_words = set(query.lower().split())
+                scored_results = []
+                
+                for doc in search_results:
+                    doc_words = set(doc.lower().split())
+                    overlap_score = len(query_words.intersection(doc_words))
+                    scored_results.append((overlap_score, doc))
+                
+                # Sort by overlap score (descending) and take the documents
+                context_docs = [doc for score, doc in sorted(scored_results, key=lambda x: x[0], reverse=True)]
+            except Exception as e:
+                context_docs = search_results
+        
+        context = "\n\n---\n\n".join(context_docs)
+        
+        prompt = f"""
+        Based on the following context, please answer the question.
+
+        Context:
+        {context}
+
+        Question: {query}
+
+        Answer:
+        """
+
+        response = self.openai_client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that answers questions based on provided documentation."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        
+        return response.choices[0].message.content, context_docs
+    
     def get_rag_response(self, messages, model=None, temperature=0.7, max_tokens=None):
         """Get a RAG-enhanced response for chat completions API."""
         if not messages:

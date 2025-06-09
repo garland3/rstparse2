@@ -5,7 +5,7 @@ const sendButton = document.getElementById('sendButton');
 const rerankCheckbox = document.getElementById('rerankCheckbox');
 const loading = document.getElementById('loading');
 
-function addMessage(content, isUser = false, isError = false) {
+function addMessage(content, isUser = false, isError = false, sources = []) {
     const messageDiv = document.createElement('div');
     messageDiv.className = `message ${isUser ? 'user' : (isError ? 'error' : 'bot')}`;
     
@@ -29,6 +29,12 @@ function addMessage(content, isUser = false, isError = false) {
             // Fallback to plain text if markdown parsing fails
             contentDiv.textContent = content;
         }
+        
+        // Add sources if available
+        if (sources && sources.length > 0) {
+            const sourcesContainer = createSourcesContainer(sources);
+            contentDiv.appendChild(sourcesContainer);
+        }
     }
     
     messageDiv.appendChild(contentDiv);
@@ -36,6 +42,63 @@ function addMessage(content, isUser = false, isError = false) {
     
     // Scroll to bottom
     chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function createSourcesContainer(sources) {
+    const sourcesContainer = document.createElement('div');
+    sourcesContainer.className = 'sources-container';
+    
+    // Create header
+    const sourcesHeader = document.createElement('div');
+    sourcesHeader.className = 'sources-header';
+    sourcesHeader.innerHTML = `
+        <span class="sources-toggle">▶</span>
+        <span>View Sources</span>
+        <span class="sources-count">${sources.length}</span>
+    `;
+    
+    // Create content container
+    const sourcesContent = document.createElement('div');
+    sourcesContent.className = 'sources-content';
+    
+    // Add each source chunk
+    sources.forEach((source, index) => {
+        const sourceChunk = document.createElement('div');
+        sourceChunk.className = 'source-chunk';
+        
+        const sourceHeader = document.createElement('div');
+        sourceHeader.className = 'source-chunk-header';
+        sourceHeader.textContent = `Source ${index + 1}`;
+        
+        const sourceContent = document.createElement('div');
+        sourceContent.className = 'source-chunk-content';
+        sourceContent.textContent = source;
+        
+        sourceChunk.appendChild(sourceHeader);
+        sourceChunk.appendChild(sourceContent);
+        sourcesContent.appendChild(sourceChunk);
+    });
+    
+    // Add click handler to toggle sources
+    sourcesHeader.addEventListener('click', () => {
+        const toggle = sourcesHeader.querySelector('.sources-toggle');
+        const isExpanded = sourcesContent.classList.contains('expanded');
+        
+        if (isExpanded) {
+            sourcesContent.classList.remove('expanded');
+            toggle.classList.remove('expanded');
+            toggle.textContent = '▶';
+        } else {
+            sourcesContent.classList.add('expanded');
+            toggle.classList.add('expanded');
+            toggle.textContent = '▼';
+        }
+    });
+    
+    sourcesContainer.appendChild(sourcesHeader);
+    sourcesContainer.appendChild(sourcesContent);
+    
+    return sourcesContainer;
 }
 
 function setLoading(isLoading) {
@@ -76,7 +139,7 @@ chatForm.addEventListener('submit', async (e) => {
         if (data.error) {
             addMessage(`Error: ${data.error}`, false, true);
         } else {
-            addMessage(data.response || 'No response received.');
+            addMessage(data.response || 'No response received.', false, false, data.sources || []);
         }
     } catch (error) {
         addMessage(`Error: ${error.message}`, false, true);

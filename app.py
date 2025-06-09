@@ -21,6 +21,7 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
+    sources: List[str] = []
     error: str = None
 
 # OpenAI-compatible models
@@ -150,25 +151,10 @@ async def chat(request: ChatRequest):
     Send a message to the RAG pipeline and get a response.
     """
     try:
-        # Capture the response from the RAG pipeline
-        import io
-        from contextlib import redirect_stdout
+        # Use the new method that returns both response and sources
+        response_text, sources = rag_pipeline.get_answer_with_sources(request.message, rerank=request.rerank)
         
-        # Capture stdout to get the LLM response
-        captured_output = io.StringIO()
-        
-        with redirect_stdout(captured_output):
-            rag_pipeline.answer_question(request.message, rerank=request.rerank)
-        
-        output = captured_output.getvalue()
-        
-        # Extract the LLM response from the captured output
-        if "--- LLM Response ---" in output:
-            response_text = output.split("--- LLM Response ---")[-1].strip()
-        else:
-            response_text = "No response generated. Please check if documents are indexed."
-        
-        return ChatResponse(response=response_text)
+        return ChatResponse(response=response_text, sources=sources)
     
     except Exception as e:
         return ChatResponse(response="", error=str(e))
