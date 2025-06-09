@@ -27,7 +27,7 @@ docker-compose exec app python main.py index ./docs/
 ### Regular Usage
 ```bash
 # Start services (no rebuild needed unless dependencies changed)
-docker-compose up -d
+docker-compose up -d --build
 
 # Index new/updated documents
 docker-compose exec app python main.py index ./docs/

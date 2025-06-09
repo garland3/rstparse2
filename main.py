@@ -28,12 +28,22 @@ DB_NAME = os.getenv("DB_NAME", "rag_db")
 DB_USER = os.getenv("DB_USER", "rag_user")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "rag_password")
 
+# Embedding provider configuration
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "mistral").lower()
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_API_BASE = os.getenv("OPENAI_API_BASE")
 
-EMBEDDING_MODEL = os.getenv("MISTRAL_MODEL", "mistral-embed")
+# Model configuration
+MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-embed")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4-turbo")
+OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+
+# Set embedding model based on provider
+if EMBEDDING_PROVIDER == "openai":
+    EMBEDDING_MODEL = OPENAI_EMBEDDING_MODEL
+else:
+    EMBEDDING_MODEL = MISTRAL_MODEL
 
 # Chunking configuration
 MAX_CHUNK_TOKENS = int(os.getenv("MAX_CHUNK_TOKENS", "6000"))
@@ -92,17 +102,39 @@ def get_db_connection_with_vector():
 
 def setup_database():
     """Sets up the necessary tables in the database."""
+    # Determine embedding dimension based on provider
+    if EMBEDDING_PROVIDER == "openai":
+        embedding_dim = 1536  # OpenAI text-embedding-3-small dimension
+    else:
+        embedding_dim = 1024  # Mistral mistral-embed dimension
+    
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+            
+            # Check if documents table exists and get its embedding dimension
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS documents (
-                    id SERIAL PRIMARY KEY,
-                    file_path TEXT NOT NULL UNIQUE,
-                    content TEXT NOT NULL,
-                    embedding VECTOR(1024)
-                );
+                SELECT column_name, data_type, character_maximum_length 
+                FROM information_schema.columns 
+                WHERE table_name = 'documents' AND column_name = 'embedding';
             """)
+            existing_embedding = cur.fetchone()
+            
+            if existing_embedding:
+                print(f"Documents table already exists. Current embedding configuration detected.")
+                print(f"Note: If you're switching embedding providers, you may need to re-index your documents.")
+            else:
+                # Create table with appropriate embedding dimension
+                cur.execute(f"""
+                    CREATE TABLE IF NOT EXISTS documents (
+                        id SERIAL PRIMARY KEY,
+                        file_path TEXT NOT NULL UNIQUE,
+                        content TEXT NOT NULL,
+                        embedding VECTOR({embedding_dim})
+                    );
+                """)
+                print(f"Created documents table with {embedding_dim}-dimensional embeddings for {EMBEDDING_PROVIDER} provider.")
+            
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS functions (
                     id SERIAL PRIMARY KEY,
@@ -248,16 +280,55 @@ def chunk_text(text, max_tokens=None):
 # --- RAG Pipeline ---
 class RAGPipeline:
     def __init__(self):
-        self.mistral_client = Mistral(api_key=MISTRAL_API_KEY)
-        self.openai_client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
+        self._validate_configuration()
+        
+        # Initialize clients based on provider
+        if EMBEDDING_PROVIDER == "openai":
+            if not OPENAI_API_KEY:
+                raise ValueError("OPENAI_API_KEY is required when EMBEDDING_PROVIDER=openai")
+            self.openai_client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
+            self.mistral_client = None
+        else:
+            if not MISTRAL_API_KEY:
+                raise ValueError("MISTRAL_API_KEY is required when EMBEDDING_PROVIDER=mistral")
+            self.mistral_client = Mistral(api_key=MISTRAL_API_KEY)
+            # Still need OpenAI client for question answering
+            if not OPENAI_API_KEY:
+                raise ValueError("OPENAI_API_KEY is required for question answering")
+            self.openai_client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
+        
+        print(f"Initialized RAG Pipeline with {EMBEDDING_PROVIDER} embeddings using model: {EMBEDDING_MODEL}")
+    
+    def _validate_configuration(self):
+        """Validate the embedding provider configuration."""
+        if EMBEDDING_PROVIDER not in ["mistral", "openai"]:
+            raise ValueError(f"Invalid EMBEDDING_PROVIDER: {EMBEDDING_PROVIDER}. Must be 'mistral' or 'openai'")
+        
+        if EMBEDDING_PROVIDER == "openai" and not OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY is required when using OpenAI embeddings")
+        
+        if EMBEDDING_PROVIDER == "mistral" and not MISTRAL_API_KEY:
+            raise ValueError("MISTRAL_API_KEY is required when using Mistral embeddings")
+        
+        if not OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY is required for question answering")
 
     def get_embedding(self, text):
-        """Generates an embedding for the given text using Mistral."""
-        embeddings_batch_response = self.mistral_client.embeddings.create(
-            model=EMBEDDING_MODEL,
-            inputs=[text]
-        )
-        return embeddings_batch_response.data[0].embedding
+        """Generates an embedding for the given text using the configured provider."""
+        if EMBEDDING_PROVIDER == "openai":
+            # Use OpenAI embeddings
+            response = self.openai_client.embeddings.create(
+                model=EMBEDDING_MODEL,
+                input=text
+            )
+            return response.data[0].embedding
+        else:
+            # Use Mistral embeddings (default)
+            embeddings_batch_response = self.mistral_client.embeddings.create(
+                model=EMBEDDING_MODEL,
+                inputs=[text]
+            )
+            return embeddings_batch_response.data[0].embedding
 
     def index_documents(self, doc_paths):
         """Parses, vectorizes, and indexes the Sphinx documents."""

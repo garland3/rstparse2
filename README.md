@@ -7,7 +7,7 @@ A Retrieval-Augmented Generation (RAG) pipeline that indexes and queries Sphinx 
 ## Features
 
 - Parse and index .rst (reStructuredText) files
-- Vector embeddings using **Mistral AI (latest v1.x client)**
+- **Configurable vector embeddings**: Choose between **Mistral AI** or **OpenAI** embeddings
 - Keyword extraction using YAKE
 - PostgreSQL database with pgvector for similarity search
 - Question answering using OpenAI GPT models
@@ -20,8 +20,45 @@ A Retrieval-Augmented Generation (RAG) pipeline that indexes and queries Sphinx 
 
 - Docker and Docker Compose
 - API keys for:
-  - **Mistral AI** (for embeddings) - Get yours at [console.mistral.ai](https://console.mistral.ai)
-  - **OpenAI** (for question answering)
+  - **Mistral AI** (for embeddings when using Mistral provider) - Get yours at [console.mistral.ai](https://console.mistral.ai)
+  - **OpenAI** (for question answering and embeddings when using OpenAI provider)
+
+## Embedding Provider Configuration
+
+The system supports two embedding providers that you can toggle between in your `.env` file:
+
+### Mistral AI Embeddings (Default)
+- **Model**: `mistral-embed`
+- **Dimensions**: 1024
+- **Advantages**: Cost-effective, good performance
+- **Configuration**:
+  ```bash
+  EMBEDDING_PROVIDER=mistral
+  MISTRAL_API_KEY=your_mistral_api_key_here
+  ```
+
+### OpenAI Embeddings
+- **Model**: `text-embedding-3-small` (configurable)
+- **Dimensions**: 1536
+- **Advantages**: High quality, well-tested
+- **Configuration**:
+  ```bash
+  EMBEDDING_PROVIDER=openai
+  OPENAI_API_KEY=your_openai_api_key_here
+  OPENAI_EMBEDDING_MODEL=text-embedding-3-small  # Optional, defaults to text-embedding-3-small
+  ```
+
+### Switching Between Providers
+
+1. **Update your `.env` file** with the desired `EMBEDDING_PROVIDER`
+2. **Restart the services**: `docker-compose down && docker-compose up -d`
+3. **Re-index your documents** if switching providers (embeddings are not compatible between providers):
+   ```bash
+   docker-compose exec app python main.py setup
+   docker-compose exec app python main.py index ./docs/
+   ```
+
+**Note**: When switching embedding providers, you'll need to re-index your documents as the embedding dimensions and vector spaces are different between providers.
 
 ## Quick Start
 
@@ -278,7 +315,7 @@ If you prefer to run without Docker:
 
 ## Database Schema
 
-- **documents**: Stores document content and vector embeddings (1024 dimensions)
+- **documents**: Stores document content and vector embeddings (1024 dimensions for Mistral, 1536 for OpenAI)
 - **functions**: Extracted function signatures from Sphinx documents
 - **keywords**: Extracted keywords using YAKE for enhanced search
 
@@ -286,14 +323,18 @@ If you prefer to run without Docker:
 
 The application uses environment variables for configuration:
 
+**Embedding Provider:**
+- `EMBEDDING_PROVIDER`: Choose between "mistral" or "openai" (default: "mistral")
+
 **Database:**
 - `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`: Database connection
 
 **AI Services:**
-- `MISTRAL_API_KEY`: For generating embeddings (required)
-- `OPENAI_API_KEY`, `OPENAI_API_BASE`: For question answering (required)
+- `MISTRAL_API_KEY`: For Mistral embeddings (required when EMBEDDING_PROVIDER=mistral)
+- `OPENAI_API_KEY`, `OPENAI_API_BASE`: For question answering and OpenAI embeddings (required)
 - `MISTRAL_MODEL`: Mistral embedding model (default: "mistral-embed")
 - `OPENAI_MODEL`: OpenAI model for question answering (default: "gpt-4-turbo")
+- `OPENAI_EMBEDDING_MODEL`: OpenAI embedding model (default: "text-embedding-3-small")
 
 ## Dependencies
 
